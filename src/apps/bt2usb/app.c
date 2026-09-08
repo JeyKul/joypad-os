@@ -15,6 +15,7 @@
 #include "bt/transport/bt_transport.h"
 #include "bt/btstack/btstack_host.h"
 #include "core/services/leds/leds.h"
+#include "core/buttons.h"
 
 #include "tusb.h"
 #include "platform/platform.h"
@@ -23,6 +24,229 @@
 #ifdef BTSTACK_USE_ESP32
 #include "driver/gpio.h"
 extern const bt_transport_t bt_transport_esp32;
+
+/* ============================================================================
+ * CUSTOM: PC POWER BUTTON + PLED SENSOR DEBUG
+ *
+ * PC817 #1: ESP32 presses motherboard PWR_SW
+ *   GPIO4 -- 390 ohm resistor -- PC817 #1 pin 1
+ *   GND ------------------------ PC817 #1 pin 2
+ *   PC817 #1 pin 3/4 ---------- motherboard PWR_SW pair
+ *
+ * PC817 #2: motherboard PWR_LED senses PC power state
+ *   PLED+ -- 390 ohm -- 390 ohm -- 390 ohm -- PC817 #2 pin 1
+ *   PLED- ---------------------------------------- PC817 #2 pin 2
+ *   PC817 #2 pin 4 ------------------------------- GPIO5
+ *   PC817 #2 pin 3 ------------------------------- ESP32 GND
+ *
+ * GPIO5 uses an internal pull-up:
+ *   GPIO5 LOW  = PC817 #2 on = PLED active = PC considered ON
+ *   GPIO5 HIGH = PC817 #2 off = PLED inactive = PC considered OFF
+ *
+ * LED debugger:
+ *   Yellow steady       = PC considered ON
+ *   Dim red steady      = PC considered OFF
+ *   Purple blink x3     = controller connected while PC considered OFF
+ *   Bright red blink x3 = Guide/Xbox + A + B manual press
+ *
+ * Safety:
+ *   Automatic PWR_SW pressing is deliberately OFF in this debug build.
+ * ========================================================================== */
+
+#define PWR_PULSE_GPIO             GPIO_NUM_4
+#define PC_ON_SENSE_GPIO           GPIO_NUM_5
+
+#define PWR_PULSE_DURATION_MS      300
+#define PWR_TRIGGER_COOLDOWN_MS    3000
+#define PWR_FLASH_STEP_MS          160
+
+#define PWR_DEBUG_COMBO_MASK       (JP_BUTTON_A1 | JP_BUTTON_B1 | JP_BUTTON_B2)
+
+typedef enum {
+    PWR_FLASH_NONE = 0,
+    PWR_FLASH_CONTROLLER_PURPLE,
+    PWR_FLASH_MANUAL_RED,
+} pwr_flash_mode_t;
+
+static bool pwr_pulse_active = false;
+static uint32_t pwr_pulse_started_ms = 0;
+static uint32_t pwr_last_trigger_ms = 0;
+
+static bool pwr_debug_combo_was_held = false;
+
+static pwr_flash_mode_t pwr_flash_mode = PWR_FLASH_NONE;
+static bool pwr_flash_led_on = false;
+static uint8_t pwr_flash_count_done = 0;
+static uint8_t pwr_flash_target_count = 0;
+static uint32_t pwr_flash_last_ms = 0;
+
+static void power_button_init(void)
+{
+    gpio_config_t pwr_cfg = {
+        .pin_bit_mask = (1ULL << PWR_PULSE_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    gpio_config_t sense_cfg = {
+        .pin_bit_mask = (1ULL << PC_ON_SENSE_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&pwr_cfg));
+    ESP_ERROR_CHECK(gpio_set_level(PWR_PULSE_GPIO, 0));
+
+    ESP_ERROR_CHECK(gpio_config(&sense_cfg));
+}
+
+static bool pc_is_on(void)
+{
+    return gpio_get_level(PC_ON_SENSE_GPIO) == 0;
+}
+
+static void power_button_start_flash(pwr_flash_mode_t mode)
+{
+    pwr_flash_mode = mode;
+    pwr_flash_led_on = false;
+    pwr_flash_count_done = 0;
+    pwr_flash_target_count = 3;
+    pwr_flash_last_ms = platform_time_ms();
+}
+
+static void power_button_press(pwr_flash_mode_t flash_mode)
+{
+    uint32_t now = platform_time_ms();
+
+    if (pwr_pulse_active) {
+        return;
+    }
+
+    if ((now - pwr_last_trigger_ms) < PWR_TRIGGER_COOLDOWN_MS) {
+        return;
+    }
+
+    gpio_set_level(PWR_PULSE_GPIO, 1);
+
+    pwr_pulse_active = true;
+    pwr_pulse_started_ms = now;
+    pwr_last_trigger_ms = now;
+
+    power_button_start_flash(flash_mode);
+}
+
+static void power_button_task(void)
+{
+    if (!pwr_pulse_active) {
+        return;
+    }
+
+    if ((platform_time_ms() - pwr_pulse_started_ms) >=
+        PWR_PULSE_DURATION_MS) {
+        gpio_set_level(PWR_PULSE_GPIO, 0);
+        pwr_pulse_active = false;
+    }
+}
+
+static void power_button_debug_combo_task(void)
+{
+    uint32_t buttons = 0;
+
+    if (playersCount > 0 && players[0].dev_addr >= 0) {
+        const input_event_t* ev =
+            router_get_output(OUTPUT_TARGET_USB_DEVICE, 0);
+
+        if (ev) {
+            buttons = ev->buttons;
+        }
+    }
+
+    bool combo_held =
+        (buttons & PWR_DEBUG_COMBO_MASK) == PWR_DEBUG_COMBO_MASK;
+
+    if (combo_held && !pwr_debug_combo_was_held) {
+        power_button_press(PWR_FLASH_MANUAL_RED);
+    }
+
+    pwr_debug_combo_was_held = combo_held;
+}
+
+static void power_button_on_controller_connection(void)
+{
+    /*
+     * PC PLED active:
+     * - PC is on or sleeping.
+     * - Do not touch PWR_SW.
+     * - Keep the persistent yellow state LED.
+     */
+    if (pc_is_on()) {
+        return;
+    }
+
+    /*
+     * PC PLED inactive:
+     * - PC is considered off.
+     * - Pulse GPIO4 through PC817 #1 for 300 ms.
+     * - Show three purple flashes.
+     */
+    power_button_press(PWR_FLASH_CONTROLLER_PURPLE);
+}
+
+static void power_button_flash_task(void)
+{
+    uint32_t now = platform_time_ms();
+
+    if (pwr_flash_mode == PWR_FLASH_NONE) {
+        return;
+    }
+
+    if ((now - pwr_flash_last_ms) < PWR_FLASH_STEP_MS) {
+        return;
+    }
+
+    pwr_flash_last_ms = now;
+    pwr_flash_led_on = !pwr_flash_led_on;
+
+    if (pwr_flash_led_on) {
+        if (pwr_flash_mode == PWR_FLASH_CONTROLLER_PURPLE) {
+            leds_set_color(120, 0, 255);
+        } else {
+            leds_set_color(255, 0, 0);
+        }
+        return;
+    }
+
+    leds_set_color(0, 0, 0);
+    pwr_flash_count_done++;
+
+    if (pwr_flash_count_done >= pwr_flash_target_count) {
+        pwr_flash_mode = PWR_FLASH_NONE;
+    }
+}
+
+static void power_button_state_led_task(void)
+{
+    /*
+     * Do not overwrite a temporary flash sequence.
+     * Persistent colour represents current PLED sensor state.
+     */
+    if (pwr_flash_mode != PWR_FLASH_NONE) {
+        return;
+    }
+
+    if (pc_is_on()) {
+        leds_set_color(255, 180, 0);  // Yellow: PLED sensed active.
+    } else {
+        leds_set_color(20, 0, 0);     // Very dim red: PLED sensed inactive.
+    }
+}
+
+/* End custom PC power-button + sensor debug block. */
+
 // Status LED GPIO — board-specific defaults
 // Feather ESP32-S3: GPIO 13 (red LED, active high). GPIO 21 is NeoPixel power!
 // Seeed XIAO ESP32-S3: GPIO 21 (active low)
@@ -33,6 +257,7 @@ extern const bt_transport_t bt_transport_esp32;
     #define STATUS_LED_GPIO 21
   #endif
 #endif
+
 #ifndef STATUS_LED_ACTIVE_LOW
   #ifdef BOARD_FEATHER_ESP32S3
     #define STATUS_LED_ACTIVE_LOW 0
@@ -40,6 +265,7 @@ extern const bt_transport_t bt_transport_esp32;
     #define STATUS_LED_ACTIVE_LOW 1
   #endif
 #endif
+
 #elif defined(BTSTACK_USE_NRF)
 extern const bt_transport_t bt_transport_nrf;
 // nRF: LED status handled by ws2812_nrf.c (RGB LEDs driven via neopixel API)
@@ -118,7 +344,7 @@ static void platform_led_set(bool on)
 #ifdef BTSTACK_USE_ESP32
     gpio_set_level(STATUS_LED_GPIO, (on ^ STATUS_LED_ACTIVE_LOW) ? 1 : 0);
 #elif defined(BTSTACK_USE_NRF)
-    // No-op: RGB LEDs driven by ws2812_nrf.c via neopixel_task()
+    // No-op: RGB LEDs driven by ws2812_nrf.c via neopixel API
     (void)on;
 #else
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on ? 1 : 0);
@@ -154,6 +380,34 @@ static void led_status_update(void)
             led_last_toggle = now;
         }
     }
+}
+
+static void power_button_pc_shutdown_task(void)
+{
+    static bool previous_pc_on = false;
+    static bool initial_state_seen = false;
+
+    bool pc_on = pc_is_on();
+
+    /*
+     * Do nothing on initial firmware boot. This prevents an immediate
+     * disconnect if the ESP itself starts while the PC is already off.
+     */
+    if (!initial_state_seen) {
+        previous_pc_on = pc_on;
+        initial_state_seen = true;
+        return;
+    }
+
+    /*
+     * Detect only a real PC-on -> PC-off transition:
+     * PLED was active, then went inactive.
+     */
+    if (previous_pc_on && !pc_on) {
+        btstack_host_disconnect_all_devices();
+    }
+
+    previous_pc_on = pc_on;
 }
 
 // ============================================================================
@@ -278,16 +532,16 @@ static const char* transport_str(input_transport_t t) {
 static void oled_init(void) {
     display_i2c_config_t cfg = {
         .i2c_inst = 0,
-        .pin_sda  = 0,     // Configured by devicetree on nRF
+        .pin_sda  = 0,
         .pin_scl  = 0,
         .addr     = 0x3C,
     };
 #ifdef BOARD_FEATHER_NRF52840
-    display_init_i2c(&cfg);  // SH1107 FeatherWing OLED
+    display_init_i2c(&cfg);
     printf("[app:bt2usb] OLED display initialized (SH1107 I2C)\n");
 #else
-    display_init_ssd1306_i2c(&cfg);  // SSD1306 XIAO Expansion Board
-    printf("[app:bt2usb] OLED display initialized (SSD1306 I2C)\n");
+    display_init_ssd1306_i2c(&cfg);
+    printf("[app:bt2usb] OLED display initialized (SSD1306 XIAO Expansion Board)\n");
 #endif
 }
 
@@ -299,16 +553,15 @@ static void oled_update_display(void) {
     static uint32_t last_buttons = 0;
     uint32_t now = platform_time_ms();
 
-    // Cache latest router output
     if (playersCount > 0 && players[0].dev_addr >= 0) {
-        const input_event_t* ev = router_get_output(OUTPUT_TARGET_USB_DEVICE, 0);
+        const input_event_t* ev =
+            router_get_output(OUTPUT_TARGET_USB_DEVICE, 0);
         if (ev) {
             oled_cached_event = *ev;
             oled_has_event = true;
         }
     }
 
-    // Feed button presses to marquee (edge detection)
     uint32_t buttons = oled_has_event ? oled_cached_event.buttons : 0;
     uint32_t newly_pressed = ~last_buttons & buttons;
     last_buttons = buttons;
@@ -318,19 +571,16 @@ static void oled_update_display(void) {
         }
     }
 
-    if (now - last_update < 50) return;  // 20fps max
+    if (now - last_update < 50) return;
     last_update = now;
 
     display_clear();
 
-    // Line 1 (large, y=0): USB output mode
     usb_output_mode_t mode = usbd_get_mode();
     display_text_large(0, 0, usbd_get_mode_name(mode));
 
-    // Separator
     display_hline(0, 17, DISPLAY_WIDTH);
 
-    // Lines 2-4: Controller info
     if (playersCount > 0 && players[0].dev_addr >= 0) {
         const char* name = get_player_name(0);
         if (name) {
@@ -347,16 +597,18 @@ static void oled_update_display(void) {
         if (oled_has_event) {
             char line[22];
             snprintf(line, sizeof(line), "L:%02X,%02X R:%02X,%02X T:%02X,%02X",
-                     oled_cached_event.analog[ANALOG_LX], oled_cached_event.analog[ANALOG_LY],
-                     oled_cached_event.analog[ANALOG_RX], oled_cached_event.analog[ANALOG_RY],
-                     oled_cached_event.analog[ANALOG_L2], oled_cached_event.analog[ANALOG_R2]);
+                     oled_cached_event.analog[ANALOG_LX],
+                     oled_cached_event.analog[ANALOG_LY],
+                     oled_cached_event.analog[ANALOG_RX],
+                     oled_cached_event.analog[ANALOG_RY],
+                     oled_cached_event.analog[ANALOG_L2],
+                     oled_cached_event.analog[ANALOG_R2]);
             display_text(0, 40, line);
         }
     } else {
         display_text(0, 28, "No controller");
     }
 
-    // Bottom (y=52): Button marquee
     display_marquee_tick();
     display_marquee_render(52);
 
@@ -372,22 +624,25 @@ static void oled_update_display(void) {
 void app_init(void)
 {
     printf("[app:bt2usb] Initializing BT2USB v%s\n", JOYPAD_VERSION);
+
 #ifdef BTSTACK_USE_ESP32
     printf("[app:bt2usb] ESP32-S3 BLE -> USB HID\n");
-    // Init status LED GPIO
+
     gpio_config_t led_cfg = {
         .pin_bit_mask = (1ULL << STATUS_LED_GPIO),
         .mode = GPIO_MODE_OUTPUT,
     };
     gpio_config(&led_cfg);
-    gpio_set_level(STATUS_LED_GPIO, STATUS_LED_ACTIVE_LOW ? 1 : 0);  // Start OFF
+    gpio_set_level(STATUS_LED_GPIO, STATUS_LED_ACTIVE_LOW ? 1 : 0);
+
+    power_button_init();
+
 #elif defined(BTSTACK_USE_NRF)
 #ifdef BOARD_FEATHER_NRF52840
     printf("[app:bt2usb] Adafruit Feather nRF52840 Express BLE -> USB HID\n");
 #else
     printf("[app:bt2usb] Seeed XIAO nRF52840 BLE -> USB HID\n");
 #endif
-    // RGB LEDs initialized by ws2812_nrf.c via leds_init()
 #ifdef OLED_I2C_DISPLAY
     oled_init();
 #endif
@@ -395,26 +650,22 @@ void app_init(void)
     printf("[app:bt2usb] Pico W built-in Bluetooth -> USB HID\n");
 #endif
 
-    // Initialize button service (uses BOOTSEL button on Pico W)
     button_init();
     button_set_callback(on_button_event);
 
-    // Configure router for BT2USB
     router_config_t router_cfg = {
         .mode = ROUTING_MODE,
         .merge_mode = MERGE_MODE,
         .max_players_per_output = {
             [OUTPUT_TARGET_USB_DEVICE] = USB_OUTPUT_PORTS,
         },
-        .merge_all_inputs = true,  // Merge all BT inputs to single output
+        .merge_all_inputs = true,
         .transform_flags = TRANSFORM_FLAGS,
     };
     router_init(&router_cfg);
 
-    // Add default route: BLE Central → USB Device
     router_add_route(INPUT_SOURCE_BLE_CENTRAL, OUTPUT_TARGET_USB_DEVICE, 0);
 
-    // Configure player management
     player_config_t player_cfg = {
         .slot_mode = PLAYER_SLOT_MODE,
         .max_slots = MAX_PLAYER_SLOTS,
@@ -422,8 +673,6 @@ void app_init(void)
     };
     players_init_with_config(&player_cfg);
 
-    // Initialize Bluetooth transport
-    // Must use bt_init() to set global transport pointer and register drivers
     printf("[app:bt2usb] Initializing Bluetooth...\n");
 #ifdef BTSTACK_USE_ESP32
     bt_init(&bt_transport_esp32);
@@ -447,13 +696,10 @@ void app_init(void)
 
 void app_task(void)
 {
-    // Handle USB suspend/resume edges (PS3 sleep -> drop BT, PS3 wake -> rescan)
     usb_suspend_check();
 
-    // Process button input
     button_task();
 
-    // Update LED color when USB output mode changes
     static usb_output_mode_t last_led_mode = USB_OUTPUT_MODE_COUNT;
     usb_output_mode_t mode = usbd_get_mode();
     if (mode != last_led_mode) {
@@ -463,14 +709,11 @@ void app_task(void)
         last_led_mode = mode;
     }
 
-    // Process Bluetooth transport
     bt_task();
 
-    // Update LED status
     leds_set_connected_devices(btstack_classic_get_connection_count());
     led_status_update();
 
-    // Route feedback from USB device output to BT controllers
     if (usbd_output_interface.get_feedback) {
         output_feedback_t fb;
         if (usbd_output_interface.get_feedback(&fb)) {
@@ -485,6 +728,27 @@ void app_task(void)
             }
         }
     }
+
+#ifdef BTSTACK_USE_ESP32
+    /*
+     * Detect controller connection edge for purple debug feedback.
+     * This diagnostic build does NOT automatically pulse GPIO4 here.
+     */
+    static int last_bt_connection_count = 0;
+    int bt_connection_count = btstack_classic_get_connection_count();
+
+    if (bt_connection_count > 0 && last_bt_connection_count == 0) {
+        power_button_on_controller_connection();
+    }
+
+    last_bt_connection_count = bt_connection_count;
+
+    power_button_debug_combo_task();
+    power_button_task();
+    power_button_flash_task();
+    power_button_state_led_task();
+    power_button_pc_shutdown_task();
+#endif
 
 #ifdef OLED_I2C_DISPLAY
     oled_update_display();
