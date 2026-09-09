@@ -534,15 +534,15 @@ static const char* transport_str(input_transport_t t) {
 static void oled_init(void) {
     display_i2c_config_t cfg = {
         .i2c_inst = 0,
-        .pin_sda  = 0,
+        .pin_sda  = 0,     // Configured by devicetree on nRF
         .pin_scl  = 0,
         .addr     = 0x3C,
     };
 #ifdef BOARD_FEATHER_NRF52840
-    display_init_i2c(&cfg);
+    display_init_i2c(&cfg);  // SH1107 FeatherWing OLED
     printf("[app:bt2usb] OLED display initialized (SH1107 I2C)\n");
 #else
-    display_init_ssd1306_i2c(&cfg);
+    display_init_ssd1306_i2c(&cfg);  // SSD1306 XIAO Expansion Board
     printf("[app:bt2usb] OLED display initialized (SSD1306 XIAO Expansion Board)\n");
 #endif
 }
@@ -564,6 +564,7 @@ static void oled_update_display(void) {
         }
     }
 
+    // Feed button presses to marquee (edge detection)
     uint32_t buttons = oled_has_event ? oled_cached_event.buttons : 0;
     uint32_t newly_pressed = ~last_buttons & buttons;
     last_buttons = buttons;
@@ -573,16 +574,19 @@ static void oled_update_display(void) {
         }
     }
 
-    if (now - last_update < 50) return;
+    if (now - last_update < 50) return;  // 20fps max
     last_update = now;
 
     display_clear();
 
+    // Line 1 (large, y=0): USB output mode
     usb_output_mode_t mode = usbd_get_mode();
     display_text_large(0, 0, usbd_get_mode_name(mode));
 
+    // Separator
     display_hline(0, 17, DISPLAY_WIDTH);
-
+    // Cache latest router output
+    // Lines 2-4: Controller info
     if (playersCount > 0 && players[0].dev_addr >= 0) {
         const char* name = get_player_name(0);
         if (name) {
@@ -611,6 +615,7 @@ static void oled_update_display(void) {
         display_text(0, 28, "No controller");
     }
 
+    // Bottom (y=52): Button marquee
     display_marquee_tick();
     display_marquee_render(52);
 
@@ -629,7 +634,7 @@ void app_init(void)
 
 #ifdef BTSTACK_USE_ESP32
     printf("[app:bt2usb] ESP32-S3 BLE -> USB HID\n");
-
+    // Init status LED GPIO
     gpio_config_t led_cfg = {
         .pin_bit_mask = (1ULL << STATUS_LED_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -645,6 +650,7 @@ void app_init(void)
 #else
     printf("[app:bt2usb] Seeed XIAO nRF52840 BLE -> USB HID\n");
 #endif
+    // RGB LEDs initialized by ws2812_nrf.c via leds_init()
 #ifdef OLED_I2C_DISPLAY
     oled_init();
 #endif
@@ -652,22 +658,26 @@ void app_init(void)
     printf("[app:bt2usb] Pico W built-in Bluetooth -> USB HID\n");
 #endif
 
+    // Initialize button service (uses BOOTSEL button on Pico W)
     button_init();
     button_set_callback(on_button_event);
 
+    // Configure router for BT2USB
     router_config_t router_cfg = {
         .mode = ROUTING_MODE,
         .merge_mode = MERGE_MODE,
         .max_players_per_output = {
             [OUTPUT_TARGET_USB_DEVICE] = USB_OUTPUT_PORTS,
         },
-        .merge_all_inputs = true,
+        .merge_all_inputs = true,  // Merge all BT inputs to single output
         .transform_flags = TRANSFORM_FLAGS,
     };
     router_init(&router_cfg);
 
+    // Add default route: BLE Central → USB Device
     router_add_route(INPUT_SOURCE_BLE_CENTRAL, OUTPUT_TARGET_USB_DEVICE, 0);
 
+    // Configure player management
     player_config_t player_cfg = {
         .slot_mode = PLAYER_SLOT_MODE,
         .max_slots = MAX_PLAYER_SLOTS,
@@ -675,6 +685,8 @@ void app_init(void)
     };
     players_init_with_config(&player_cfg);
 
+    // Initialize Bluetooth transport
+    // Must use bt_init() to set global transport pointer and register drivers
     printf("[app:bt2usb] Initializing Bluetooth...\n");
 #ifdef BTSTACK_USE_ESP32
     bt_init(&bt_transport_esp32);
@@ -698,10 +710,13 @@ void app_init(void)
 
 void app_task(void)
 {
+    // Handle USB suspend/resume edges (PS3 sleep -> drop BT, PS3 wake -> rescan)
     usb_suspend_check();
 
+    // Process button input
     button_task();
 
+    // Update LED color when USB output mode changes
     static usb_output_mode_t last_led_mode = USB_OUTPUT_MODE_COUNT;
     usb_output_mode_t mode = usbd_get_mode();
     if (mode != last_led_mode) {
@@ -711,11 +726,14 @@ void app_task(void)
         last_led_mode = mode;
     }
 
+    // Process Bluetooth transport
     bt_task();
 
+    // Update LED status
     leds_set_connected_devices(btstack_classic_get_connection_count());
     led_status_update();
 
+    // Route feedback from USB device output to BT controllers
     if (usbd_output_interface.get_feedback) {
         output_feedback_t fb;
         if (usbd_output_interface.get_feedback(&fb)) {
