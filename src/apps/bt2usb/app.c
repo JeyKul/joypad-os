@@ -382,6 +382,7 @@ static void led_status_update(void)
     }
 }
 
+#ifdef BTSTACK_USE_ESP32
 static void power_button_pc_shutdown_task(void)
 {
     static bool previous_pc_on = false;
@@ -409,6 +410,7 @@ static void power_button_pc_shutdown_task(void)
 
     previous_pc_on = pc_on;
 }
+#endif
 
 // ============================================================================
 // BUTTON EVENT HANDLER
