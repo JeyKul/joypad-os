@@ -92,7 +92,7 @@ Flash the official TinyUF2 release for your board once. This installs the bootlo
    esptool.py --chip esp32s3 -b 921600 write_flash 0x0 combined.bin
    ```
 3. The device reboots into TinyUF2 — a USB drive named `XIAOS3BOOT` appears
-4. Drop a `.uf2` firmware file onto the drive (or run `make flash-uf2-bt2usb_esp32s3`)
+4. Drop a `.uf2` firmware file onto the drive (or run `make flash-uf2-bt2usb_xiao_esp32s3`)
 
 After this one-time setup, all future updates are drag-and-drop.
 
@@ -119,17 +119,17 @@ Three ways to enter TinyUF2 from a running app:
 
 ```bash
 # Build + flash via TinyUF2 USB drive (device must be in TinyUF2 mode)
-make flash-uf2-bt2usb_esp32s3
+make flash-uf2-bt2usb_xiao_esp32s3
 
 # Build + flash via esptool USB serial (device must be in download mode)
-make flash-bt2usb_esp32s3
+make flash-bt2usb_xiao_esp32s3
 ```
 
 **Generating .uf2 files:**
 
 ```bash
-make uf2-bt2usb_esp32s3
-# Output: releases/joypad_<version>_bt2usb_esp32s3.uf2
+make uf2-bt2usb_xiao_esp32s3
+# Output: releases/joypad_<version>_bt2usb_xiao_esp32s3.uf2
 ```
 
 ## Build & Flash
@@ -148,11 +148,11 @@ This clones ESP-IDF v6.0 to `~/esp-idf` and installs the ESP32-S3 toolchain. If 
 From the repo root:
 
 ```bash
-make bt2usb_esp32s3                 # Build
-make uf2-bt2usb_esp32s3             # Build + generate .uf2
-make flash-uf2-bt2usb_esp32s3       # Build + flash .uf2 via TinyUF2 drive
-make flash-bt2usb_esp32s3           # Build + flash via esptool
-make monitor-bt2usb_esp32s3         # UART serial monitor (Ctrl+] to exit)
+make bt2usb_xiao_esp32s3                 # Build
+make uf2-bt2usb_xiao_esp32s3             # Build + generate .uf2
+make flash-uf2-bt2usb_xiao_esp32s3       # Build + flash .uf2 via TinyUF2 drive
+make flash-bt2usb_xiao_esp32s3           # Build + flash via esptool
+make monitor-bt2usb_xiao_esp32s3         # UART serial monitor (Ctrl+] to exit)
 ```
 
 Or from the `esp/` directory:

@@ -74,8 +74,8 @@ make snes2usb_kb2040   # SNES controller → USB
 
 ```bash
 make init-esp                   # One-time ESP-IDF setup
-make bt2usb_esp32s3             # Build
-make flash-bt2usb_esp32s3       # Flash
+make bt2usb_xiao_esp32s3             # Build
+make flash-bt2usb_xiao_esp32s3       # Flash
 ```
 
 ### nRF52840
