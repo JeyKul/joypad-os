@@ -199,14 +199,16 @@ static void power_button_task(void)
     }
 }
 
+// Current (held) buttons of player 1. Deliberately NOT router_get_output():
+// that returns each published frame only once and NULL afterwards, so a button
+// held steady reads as released on almost every loop and hold timers restart.
+// Peek the latest published state instead (aligned 32-bit read, no tearing).
 static uint32_t controller_buttons(void)
 {
     if (playersCount > 0 && players[0].dev_addr >= 0) {
-        const input_event_t* ev =
-            router_get_output(OUTPUT_TARGET_USB_DEVICE, 0);
-
-        if (ev) {
-            return ev->buttons;
+        const output_state_t* st = router_get_state_ptr(OUTPUT_TARGET_USB_DEVICE);
+        if (st && st[0].seq != 0) {
+            return st[0].current_state.buttons;
         }
     }
     return 0;
