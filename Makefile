@@ -1,3 +1,4 @@
+SHELL := /bin/bash
 # Joypad Top-Level Makefile
 # Builds firmware for all product variants
 
@@ -823,6 +824,25 @@ flash-bt2usb_xiao_esp32s3:
 .PHONY: monitor-bt2usb_xiao_esp32s3
 monitor-bt2usb_xiao_esp32s3:
 	@cd esp && $(MAKE) monitor
+
+# --- ESP32-S3 bt2usb on generic ESP32-S3-DevKitC-1 / N16R8 (requires ESP-IDF) ---
+# WS2812 on GPIO48 by default; rev 1.1 boards: make ... NEOPIXEL_PIN=38
+.PHONY: bt2usb_devkit_esp32s3
+bt2usb_devkit_esp32s3:
+	@echo "$(YELLOW)Building bt2usb for ESP32-S3 DevKitC...$(NC)"
+	@cd esp && $(MAKE) build BOARD=devkit_esp32s3
+	@echo "$(GREEN)✓ bt2usb_devkit_esp32s3 built successfully$(NC)"
+	@echo ""
+
+.PHONY: uf2-bt2usb_devkit_esp32s3
+uf2-bt2usb_devkit_esp32s3:
+	@echo "$(YELLOW)Building bt2usb UF2 for ESP32-S3 DevKitC...$(NC)"
+	@cd esp && $(MAKE) uf2 BOARD=devkit_esp32s3
+	@mkdir -p $(RELEASE_DIR)
+	@cp esp/build/joypad_bt2usb.uf2 \
+	    $(RELEASE_DIR)/joypad_$(VERSION_ID)_bt2usb_devkit_esp32s3.uf2
+	@echo "$(GREEN)✓ UF2 built: $(RELEASE_DIR)/joypad_$(VERSION_ID)_bt2usb_devkit_esp32s3.uf2$(NC)"
+	@echo ""
 
 # --- ESP32-S3 bt2usb on LilyGo T-Display S3 AMOLED Plus (requires ESP-IDF) ---
 # 1.91" RM67162 AMOLED shows animated companion eyes. No TinyUF2 bootloader:

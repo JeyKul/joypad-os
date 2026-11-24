@@ -559,6 +559,12 @@ endif()
 if(CONFIG_BOARD STREQUAL "feather_esp32s3")
     target_compile_definitions(${COMPONENT_LIB} PUBLIC BOARD_FEATHER_ESP32S3=1)
 endif()
+if(CONFIG_BOARD STREQUAL "devkit_esp32s3")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC BOARD_DEVKIT_ESP32S3=1)
+    if(DEFINED NEOPIXEL_PIN)
+        target_compile_definitions(${COMPONENT_LIB} PUBLIC NEOPIXEL_PIN=${NEOPIXEL_PIN})
+    endif()
+endif()
 if(CONFIG_BOARD STREQUAL "lilygo_tdisplay_s3_amoled")
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         BOARD_LILYGO_TDISPLAY_S3_AMOLED=1

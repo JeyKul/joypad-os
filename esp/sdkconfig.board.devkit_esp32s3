@@ -1,0 +1,15 @@
+# Generic ESP32-S3-DevKitC-1 / N16R8 clone board overrides
+# Button: GPIO 0 (BOOT button)
+# WS2812 RGB LED: GPIO 48 (rev 1.1 boards: GPIO 38, build with NEOPIXEL_PIN=38)
+
+# Flash size kept at 4MB to match the TinyUF2 partition layout used by the
+# other boards; 16MB modules boot fine with it.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Custom partition table for TinyUF2
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_uf2.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_uf2.csv"
+
+# Flash tool: don't reset before flash (device enters bootloader via CDC command)
+CONFIG_ESPTOOLPY_BEFORE_NORESET=y

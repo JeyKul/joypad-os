@@ -1,3 +1,4 @@
+SHELL := /bin/bash
 # Joypad ESP32-S3 Build System
 # Board selection via BOARD variable (default: xiao_esp32s3)
 # App selection via CONFIG_APP variable (default: bt2usb)
@@ -12,7 +13,7 @@ CONFIG_APP ?= bt2usb
 IDF_ENV := . ./env.sh >/dev/null 2>&1 &&
 
 # Pass CONFIG_APP and BOARD to CMake
-CMAKE_EXTRA_ARGS := -DCONFIG_APP=$(CONFIG_APP) -DCONFIG_BOARD=$(BOARD)
+CMAKE_EXTRA_ARGS := -DCONFIG_APP=$(CONFIG_APP) -DCONFIG_BOARD=$(BOARD) $(if $(NEOPIXEL_PIN),-DNEOPIXEL_PIN=$(NEOPIXEL_PIN))
 
 # Board configurations
 COMMON_SDKCONFIG := sdkconfig.defaults

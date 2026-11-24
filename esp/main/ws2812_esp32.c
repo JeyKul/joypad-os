@@ -4,20 +4,29 @@
 // waveform generation. No CPU involvement during transmission.
 //
 // Feather ESP32-S3: NeoPixel on GPIO33, power on GPIO21 (active high)
+// ESP32-S3-DevKitC-1 (and N16R8 clones): WS2812 on GPIO48 (rev 1.1: GPIO38),
+//   no power pin. Override with -DNEOPIXEL_PIN=38 if needed.
 
 #include "core/services/leds/neopixel/ws2812.h"
 #include "platform/platform.h"
 #include <stdio.h>
 #include <string.h>
 
-#ifdef BOARD_FEATHER_ESP32S3
+#if defined(BOARD_FEATHER_ESP32S3) || defined(BOARD_DEVKIT_ESP32S3)
 
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 #include "driver/gpio.h"
 
-#define NEOPIXEL_PIN       33
-#define NEOPIXEL_POWER_PIN 21
+#ifdef BOARD_FEATHER_ESP32S3
+  #define NEOPIXEL_PIN       33
+  #define NEOPIXEL_POWER_PIN 21
+#else
+  #ifndef NEOPIXEL_PIN
+    #define NEOPIXEL_PIN     48
+  #endif
+  #define NEOPIXEL_POWER_PIN -1  // DevKitC: LED always powered
+#endif
 
 // RMT resolution: 10 MHz → 100ns per tick
 #define RMT_RESOLUTION_HZ  10000000
@@ -95,6 +104,14 @@ static void neo_set_off(void)
 
 void neopixel_init(void)
 {
+    // After a warm reset (RST button, esp_restart, TinyUF2 handoff) the data
+    // pin can still hold state/peripheral routing from the previous run.
+    // Return it to a clean GPIO before the RMT channel claims it.
+    gpio_reset_pin(NEOPIXEL_PIN);
+    gpio_set_direction(NEOPIXEL_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(NEOPIXEL_PIN, 0);
+
+#if NEOPIXEL_POWER_PIN >= 0
     // Enable NeoPixel power
     gpio_config_t pwr_cfg = {
         .pin_bit_mask = (1ULL << NEOPIXEL_POWER_PIN),
@@ -105,8 +122,9 @@ void neopixel_init(void)
     };
     gpio_config(&pwr_cfg);
     gpio_set_level(NEOPIXEL_POWER_PIN, 1);
+#endif
 
-    // Small delay for power stabilization
+    // Small delay for power stabilization / WS2812 reset latch (>50us low)
     platform_sleep_ms(10);
 
     // Configure RMT TX channel
