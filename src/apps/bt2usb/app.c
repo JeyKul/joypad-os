@@ -23,6 +23,7 @@
 
 #ifdef BTSTACK_USE_ESP32
 #include "driver/gpio.h"
+#include "nvs.h"
 extern const bt_transport_t bt_transport_esp32;
 
 /* ============================================================================
@@ -49,8 +50,11 @@ extern const bt_transport_t bt_transport_esp32;
  *   Purple blink x3     = controller connected while PC considered OFF
  *   Bright red blink x3 = Guide/Xbox + A + B manual press
  *
- * Safety:
- *   Automatic PWR_SW pressing is deliberately OFF in this debug build.
+ * Mode toggle (persisted in NVS, namespace "bt2usb_app", key "pc_mode"):
+ *   Hold Select + Start + L1 + R1 for 2 s on the controller.
+ *   Yellow blink x3 = PC power mode (default)
+ *   Green blink x3  = plain USB adapter mode: no PWR_SW pulses, no PLED
+ *                     colours, no disconnect on PC shutdown.
  * ========================================================================== */
 
 #define PWR_PULSE_GPIO             GPIO_NUM_4
@@ -62,11 +66,25 @@ extern const bt_transport_t bt_transport_esp32;
 
 #define PWR_DEBUG_COMBO_MASK       (JP_BUTTON_A1 | JP_BUTTON_B1 | JP_BUTTON_B2)
 
+#define MODE_TOGGLE_COMBO_MASK     (JP_BUTTON_S1 | JP_BUTTON_S2 | \
+                                    JP_BUTTON_L1 | JP_BUTTON_R1)
+#define MODE_TOGGLE_HOLD_MS        2000
+
+#define APP_NVS_NAMESPACE          "bt2usb_app"
+#define APP_NVS_KEY_PC_MODE        "pc_mode"
+
 typedef enum {
     PWR_FLASH_NONE = 0,
     PWR_FLASH_CONTROLLER_PURPLE,
     PWR_FLASH_MANUAL_RED,
+    PWR_FLASH_MODE_PC_YELLOW,
+    PWR_FLASH_MODE_ADAPTER_GREEN,
 } pwr_flash_mode_t;
+
+// true = PC power mode (GPIO4/GPIO5 logic active), false = plain adapter
+static bool pc_mode = true;
+// Adapter mode: restore the USB-mode LED colour once after a flash/switch
+static bool adapter_led_restore_pending = false;
 
 static bool pwr_pulse_active = false;
 static uint32_t pwr_pulse_started_ms = 0;
@@ -79,6 +97,31 @@ static bool pwr_flash_led_on = false;
 static uint8_t pwr_flash_count_done = 0;
 static uint8_t pwr_flash_target_count = 0;
 static uint32_t pwr_flash_last_ms = 0;
+
+static void pc_mode_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(APP_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;  // Nothing stored yet: keep default (PC mode)
+    }
+    uint8_t v = 1;
+    if (nvs_get_u8(h, APP_NVS_KEY_PC_MODE, &v) == ESP_OK) {
+        pc_mode = (v != 0);
+    }
+    nvs_close(h);
+}
+
+static void pc_mode_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(APP_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        printf("[app:bt2usb] NVS open failed, mode not saved\n");
+        return;
+    }
+    nvs_set_u8(h, APP_NVS_KEY_PC_MODE, pc_mode ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 static void power_button_init(void)
 {
@@ -102,6 +145,10 @@ static void power_button_init(void)
     ESP_ERROR_CHECK(gpio_set_level(PWR_PULSE_GPIO, 0));
 
     ESP_ERROR_CHECK(gpio_config(&sense_cfg));
+
+    pc_mode_load();
+    adapter_led_restore_pending = !pc_mode;
+    printf("[app:bt2usb] Mode: %s\n", pc_mode ? "PC power" : "USB adapter");
 }
 
 static bool pc_is_on(void)
@@ -152,18 +199,58 @@ static void power_button_task(void)
     }
 }
 
-static void power_button_debug_combo_task(void)
+static uint32_t controller_buttons(void)
 {
-    uint32_t buttons = 0;
-
     if (playersCount > 0 && players[0].dev_addr >= 0) {
         const input_event_t* ev =
             router_get_output(OUTPUT_TARGET_USB_DEVICE, 0);
 
         if (ev) {
-            buttons = ev->buttons;
+            return ev->buttons;
         }
     }
+    return 0;
+}
+
+static void mode_toggle_task(void)
+{
+    static uint32_t hold_started_ms = 0;
+    static bool holding = false;
+    static bool fired = false;
+
+    uint32_t buttons = controller_buttons();
+    bool held = (buttons & MODE_TOGGLE_COMBO_MASK) == MODE_TOGGLE_COMBO_MASK;
+
+    if (!held) {
+        holding = false;
+        fired = false;
+        return;
+    }
+
+    uint32_t now = platform_time_ms();
+    if (!holding) {
+        holding = true;
+        hold_started_ms = now;
+        return;
+    }
+
+    if (fired || (now - hold_started_ms) < MODE_TOGGLE_HOLD_MS) {
+        return;
+    }
+    fired = true;  // Once per hold; release to toggle again
+
+    pc_mode = !pc_mode;
+    pc_mode_save();
+    printf("[app:bt2usb] Mode toggled -> %s\n",
+           pc_mode ? "PC power" : "USB adapter");
+    power_button_start_flash(pc_mode ? PWR_FLASH_MODE_PC_YELLOW
+                                     : PWR_FLASH_MODE_ADAPTER_GREEN);
+    adapter_led_restore_pending = !pc_mode;
+}
+
+static void power_button_debug_combo_task(void)
+{
+    uint32_t buttons = pc_mode ? controller_buttons() : 0;
 
     bool combo_held =
         (buttons & PWR_DEBUG_COMBO_MASK) == PWR_DEBUG_COMBO_MASK;
@@ -183,7 +270,7 @@ static void power_button_on_controller_connection(void)
      * - Do not touch PWR_SW.
      * - Keep the persistent yellow state LED.
      */
-    if (pc_is_on()) {
+    if (!pc_mode || pc_is_on()) {
         return;
     }
 
@@ -212,10 +299,11 @@ static void power_button_flash_task(void)
     pwr_flash_led_on = !pwr_flash_led_on;
 
     if (pwr_flash_led_on) {
-        if (pwr_flash_mode == PWR_FLASH_CONTROLLER_PURPLE) {
-            leds_set_color(120, 0, 255);
-        } else {
-            leds_set_color(255, 0, 0);
+        switch (pwr_flash_mode) {
+            case PWR_FLASH_CONTROLLER_PURPLE:  leds_set_color(120, 0, 255); break;
+            case PWR_FLASH_MODE_PC_YELLOW:     leds_set_color(255, 180, 0); break;
+            case PWR_FLASH_MODE_ADAPTER_GREEN: leds_set_color(0, 255, 0);   break;
+            default:                           leds_set_color(255, 0, 0);   break;
         }
         return;
     }
@@ -238,10 +326,23 @@ static void power_button_state_led_task(void)
         return;
     }
 
+    if (!pc_mode) {
+        // Adapter mode: back to the normal USB-output-mode colour.
+        if (adapter_led_restore_pending) {
+            uint8_t r, g, b;
+            usbd_get_mode_color(usbd_get_mode(), &r, &g, &b);
+            leds_set_color(r, g, b);
+            adapter_led_restore_pending = false;
+        }
+        return;
+    }
+
     if (pc_is_on()) {
         leds_set_color(255, 180, 0);  // Yellow: PLED sensed active.
     } else {
-        leds_set_color(20, 0, 0);     // Very dim red: PLED sensed inactive.
+        // Dim red: PLED sensed inactive. Not much dimmer than this: while no
+        // controller is connected the LED breathes, scaling this further down.
+        leds_set_color(60, 0, 0);
     }
 }
 
@@ -404,7 +505,7 @@ static void power_button_pc_shutdown_task(void)
      * Detect only a real PC-on -> PC-off transition:
      * PLED was active, then went inactive.
      */
-    if (previous_pc_on && !pc_on) {
+    if (pc_mode && previous_pc_on && !pc_on) {
         btstack_host_disconnect_all_devices();
     }
 
@@ -763,6 +864,7 @@ void app_task(void)
 
     last_bt_connection_count = bt_connection_count;
 
+    mode_toggle_task();
     power_button_debug_combo_task();
     power_button_task();
     power_button_flash_task();
