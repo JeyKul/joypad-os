@@ -51,7 +51,8 @@ extern const bt_transport_t bt_transport_esp32;
  *   Bright red blink x3 = Guide/Xbox + A + B manual press
  *
  * Mode toggle (persisted in NVS, namespace "bt2usb_app", key "pc_mode"):
- *   Hold Select + Start + L1 + R1 for 2 s on the controller.
+ *   Hold Select + Start + L1 + R1 for 2 s on the controller (LED white
+ *   while held).
  *   Yellow blink x3 = PC power mode (default)
  *   Green blink x3  = plain USB adapter mode: no PWR_SW pulses, no PLED
  *                     colours, no disconnect on PC shutdown.
@@ -229,19 +230,9 @@ static void mode_toggle_task(void)
     uint32_t buttons = controller_buttons();
     bool held = (buttons & MODE_TOGGLE_COMBO_MASK) == MODE_TOGGLE_COMBO_MASK;
 
-    // DIAG: log every button change so the combo bits can be checked on UART0
-    static uint32_t diag_last_buttons = 0;
-    if (buttons != diag_last_buttons) {
-        printf("[app:bt2usb] DIAG buttons=0x%08lx players=%d p0.dev=%d need=0x%08lx\n",
-               (unsigned long)buttons, playersCount,
-               playersCount > 0 ? players[0].dev_addr : -1,
-               (unsigned long)MODE_TOGGLE_COMBO_MASK);
-        diag_last_buttons = buttons;
-    }
-
     if (!held) {
         if (holding && !fired && pwr_flash_mode == PWR_FLASH_NONE) {
-            adapter_led_restore_pending = !pc_mode;  // DIAG: undo white
+            adapter_led_restore_pending = !pc_mode;  // released early: undo white
         }
         holding = false;
         fired = false;
@@ -252,11 +243,11 @@ static void mode_toggle_task(void)
     if (!holding) {
         holding = true;
         hold_started_ms = now;
-        printf("[app:bt2usb] DIAG mode combo held, waiting %d ms\n", MODE_TOGGLE_HOLD_MS);
+        printf("[app:bt2usb] Mode combo held, toggling in %d ms\n", MODE_TOGGLE_HOLD_MS);
         return;
     }
 
-    // DIAG: white while the combo is held, so detection is visible on the LED
+    // White while the combo is held: shows it was recognised
     if (!fired && pwr_flash_mode == PWR_FLASH_NONE) {
         leds_set_color(255, 255, 255);
     }
@@ -348,7 +339,7 @@ static bool mode_combo_holding(void);
 static void power_button_state_led_task(void)
 {
     if (mode_combo_holding()) {
-        return;  // DIAG: keep the white "combo detected" colour visible
+        return;  // keep the white "combo held" colour visible
     }
 
     /*
